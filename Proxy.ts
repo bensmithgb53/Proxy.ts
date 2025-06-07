@@ -1,4 +1,5 @@
 import { serve } from "https://deno.land/std@0.223.0/http/server.ts";
+import * as protobuf from "https://deno.land/x/protobuf@0.1.0/mod.ts";
 
 // Transform function mimicking bundle.js's r()
 function transformR(input: string): string {
@@ -36,7 +37,15 @@ async function decryptAES(encrypted: Uint8Array, whatHeader: string): Promise<st
   }
 }
 
-// Improved deserialization (attempts binary-to-string, logs input)
+// Protobuf schema (inferred from bundle.js)
+const protoSchema = `
+syntax = "proto3";
+message StreamResponse {
+  string u = 1;
+}
+`;
+
+// Deserialization with Protobuf support
 function deserializeBinary(data: string): string {
   console.log(`Deserializing input: ${data.slice(0, 50)}...`);
   try {
@@ -47,14 +56,26 @@ function deserializeBinary(data: string): string {
   } catch {
     console.log(`Base64 failed`);
     try {
-      // Fallback: Treat as raw binary (mimic n.deserializeBinary)
+      // Try Protobuf parsing
+      const root = protobuf.parse(protoSchema).root;
+      const StreamResponse = root.lookupType("StreamResponse");
       const bytes = new Uint8Array(data.split("").map(c => c.charCodeAt(0)));
-      const decoded = new TextDecoder().decode(bytes);
-      console.log(`Binary decoded: ${decoded.slice(0, 50)}...`);
+      const message = StreamResponse.decode(bytes);
+      const decoded = message.u || new TextDecoder().decode(bytes);
+      console.log(`Protobuf decoded: ${decoded.slice(0, 50)}...`);
       return decoded;
-    } catch {
-      console.log(`Binary failed, using raw: ${data.slice(0, 50)}...`);
-      return data; // Final fallback
+    } catch (e) {
+      console.log(`Protobuf failed: ${e.message}`);
+      try {
+        // Fallback: Binary to string
+        const bytes = new Uint8Array(data.split("").map(c => c.charCodeAt(0)));
+        const decoded = new TextDecoder().decode(bytes);
+        console.log(`Binary decoded: ${decoded.slice(0, 50)}...`);
+        return decoded;
+      } catch {
+        console.log(`Binary failed, using raw: ${data.slice(0, 50)}...`);
+        return data;
+      }
     }
   }
 }
@@ -99,17 +120,18 @@ serve(async (req: Request) => {
 
       // Deserialize and transform
       const deserialized = deserializeBinary(encrypted);
-      console.log(`Transformed: ${deserialized.slice(0, 50)}...`);
+      console.log(`Deserialized: ${deserialized.slice(0, 50)}...`);
       const transformed = transformR(deserialized);
+      console.log(`Transformed: ${transformed.slice(0, 50)}...`);
 
       // Decrypt to get m3u8 path
       const encryptedBytes = new TextEncoder().encode(transformed);
       const decryptedPath = await decryptAES(encryptedBytes, whatHeader);
       console.log(`Raw decrypted path: ${decryptedPath}`);
-      
+
       // Sanitize and validate path
       const sanitizedPath = sanitizePath(decryptedPath);
-      
+
       // Construct and validate URL
       const m3u8Url = `https://rr.buytommy.top${sanitizedPath}`;
       try {
@@ -117,7 +139,6 @@ serve(async (req: Request) => {
         console.log(`Constructed m3u8 URL: ${m3u8Url}`);
       } catch (e) {
         console.error(`Invalid m3u8 URL: ${m3u8Url}`);
-        console.error(`Invalid URL: ${m3u8Url}`);
         return new Response(`Invalid URL: ${m3u8Url}`, { status: 400 });
       }
 
@@ -131,7 +152,7 @@ serve(async (req: Request) => {
       }
       let m3u8Content = await response.text();
       if (!m3u8Content.includes("#EXTM3U")) {
-        console.error("Invalid m3U8 content");
+        console.error("Invalid M3U8 content");
         return new Response("Invalid M3U8 content", { status: 500 });
       }
 
