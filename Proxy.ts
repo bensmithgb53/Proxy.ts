@@ -36,16 +36,26 @@ async function decryptAES(encrypted: Uint8Array, whatHeader: string): Promise<st
   }
 }
 
-// Improved deserialization (still a placeholder, logs input)
+// Improved deserialization (attempts binary-to-string, logs input)
 function deserializeBinary(data: string): string {
-  console.log(`Deserializing input: ${data.slice(0, 50)}...`); // Log first 50 chars
+  console.log(`Deserializing input: ${data.slice(0, 50)}...`);
   try {
-    const decoded = atob(data); // Try base64
+    // Try base64 first
+    const decoded = atob(data);
     console.log(`Base64 decoded: ${decoded.slice(0, 50)}...`);
     return decoded;
   } catch {
-    console.log(`Base64 failed, using raw: ${data.slice(0, 50)}...`);
-    return data; // Fallback to raw string
+    console.log(`Base64 failed`);
+    try {
+      // Fallback: Treat as raw binary (mimic n.deserializeBinary)
+      const bytes = new Uint8Array(data.split("").map(c => c.charCodeAt(0)));
+      const decoded = new TextDecoder().decode(bytes);
+      console.log(`Binary decoded: ${decoded.slice(0, 50)}...`);
+      return decoded;
+    } catch {
+      console.log(`Binary failed, using raw: ${data.slice(0, 50)}...`);
+      return data; // Final fallback
+    }
   }
 }
 
@@ -54,6 +64,11 @@ function sanitizePath(path: string): string {
   // Ensure path starts with / and contains only valid URL characters
   const sanitized = `/${path.replace(/^\/+/, "").replace(/[^a-zA-Z0-9\/._-]/g, "")}`;
   console.log(`Sanitized path: ${sanitized}`);
+  // Check if path resembles a valid m3u8 path
+  if (!sanitized.match(/^\/secure\/[a-zA-Z0-9]+\/[a-z]+\/stream\/[a-z-]+\/[0-9]+\/playlist\.m3u8$/)) {
+    console.error(`Invalid m3u8 path format: ${sanitized}`);
+    throw new Error(`Invalid m3u8 path: ${sanitized}`);
+  }
   return sanitized;
 }
 
@@ -84,13 +99,17 @@ serve(async (req: Request) => {
 
       // Deserialize and transform
       const deserialized = deserializeBinary(encrypted);
+      console.log(`Transformed: ${deserialized.slice(0, 50)}...`);
       const transformed = transformR(deserialized);
 
       // Decrypt to get m3u8 path
       const encryptedBytes = new TextEncoder().encode(transformed);
       const decryptedPath = await decryptAES(encryptedBytes, whatHeader);
-      // Sanitize path
+      console.log(`Raw decrypted path: ${decryptedPath}`);
+      
+      // Sanitize and validate path
       const sanitizedPath = sanitizePath(decryptedPath);
+      
       // Construct and validate URL
       const m3u8Url = `https://rr.buytommy.top${sanitizedPath}`;
       try {
@@ -98,6 +117,7 @@ serve(async (req: Request) => {
         console.log(`Constructed m3u8 URL: ${m3u8Url}`);
       } catch (e) {
         console.error(`Invalid m3u8 URL: ${m3u8Url}`);
+        console.error(`Invalid URL: ${m3u8Url}`);
         return new Response(`Invalid URL: ${m3u8Url}`, { status: 400 });
       }
 
@@ -106,12 +126,12 @@ serve(async (req: Request) => {
       if (cookies) headers.set("Cookie", cookies);
       const response = await fetch(m3u8Url, { headers });
       if (!response.ok) {
-        console.error(`m3u8 fetch failed: ${response.status} ${response.statusText}`);
+        console.error(`m3u8 fetch failed: ${response.status}: ${response.statusText}`);
         return new Response(`Failed to fetch m3u8: ${response.statusText}`, { status: response.status });
       }
       let m3u8Content = await response.text();
       if (!m3u8Content.includes("#EXTM3U")) {
-        console.error("Invalid M3U8 content");
+        console.error("Invalid m3U8 content");
         return new Response("Invalid M3U8 content", { status: 500 });
       }
 
@@ -145,7 +165,7 @@ serve(async (req: Request) => {
       return new Response(JSON.stringify({ proxiedUrl }), {
         headers: {
           "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*" // Fixed: Removed duplicate Content-Type
+          "Access-Control-Allow-Origin": "*"
         }
       });
     } catch (error) {
