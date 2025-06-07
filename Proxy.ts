@@ -1,5 +1,5 @@
 import { serve } from "https://deno.land/std@0.223.0/http/server.ts";
-import * as protobuf from "https://deno.land/x/protobuf@0.1.0/mod.ts";
+import * as protobuf from "https://esm.sh/protobufjs@7.4.0";
 
 // Transform function mimicking bundle.js's r()
 function transformR(input: string): string {
@@ -45,37 +45,43 @@ message StreamResponse {
 }
 `;
 
-// Deserialization with Protobuf support
+// Deserialization with Protobuf and custom fallback
 function deserializeBinary(data: string): string {
   console.log(`Deserializing input: ${data.slice(0, 50)}...`);
   try {
-    // Try base64 first
-    const decoded = atob(data);
-    console.log(`Base64 decoded: ${decoded.slice(0, 50)}...`);
-    return decoded;
-  } catch {
-    console.log(`Base64 failed`);
+    // Try base64 decoding
+    const bytes = new Uint8Array([...atob(data)].map(c => c.charCodeAt(0)));
+    console.log(`Base64 decoded bytes: ${bytes.slice(0, 20)}...`);
     try {
       // Try Protobuf parsing
-      const root = protobuf.parse(protoSchema).root;
+      const root = protobuf.parse(protoSchema);
       const StreamResponse = root.lookupType("StreamResponse");
-      const bytes = new Uint8Array(data.split("").map(c => c.charCodeAt(0)));
       const message = StreamResponse.decode(bytes);
       const decoded = message.u || new TextDecoder().decode(bytes);
       console.log(`Protobuf decoded: ${decoded.slice(0, 50)}...`);
       return decoded;
     } catch (e) {
       console.log(`Protobuf failed: ${e.message}`);
-      try {
-        // Fallback: Binary to string
-        const bytes = new Uint8Array(data.split("").map(c => c.charCodeAt(0)));
-        const decoded = new TextDecoder().decode(bytes);
-        console.log(`Binary decoded: ${decoded.slice(0, 50)}...`);
-        return decoded;
-      } catch {
-        console.log(`Binary failed, using raw: ${data.slice(0, 50)}...`);
-        return data;
-      }
+      // Fallback: Use decoded bytes as string
+      const decoded = new TextDecoder().decode(bytes);
+      console.log(`Binary decoded: ${decoded.slice(0, 50)}...`);
+      return decoded;
+    }
+  } catch {
+    console.log(`Base64 failed`);
+    try {
+      // Custom fallback: Assume raw binary string
+      const bytes = new Uint8Array(data.split("").map(c => c.charCodeAt(0)));
+      const decoded = new TextDecoder().decode(bytes);
+      console.log(`Raw binary decoded: ${decoded.slice(0, 50)}...`);
+      // Heuristic: Extract string after first null byte (mimic getU())
+      const nullIndex = decoded.indexOf("\0");
+      const extracted = nullIndex >= 0 ? decoded.slice(nullIndex + 1) : decoded;
+      console.log(`Extracted string: ${extracted.slice(0, 50)}...`);
+      return extracted;
+    } catch {
+      console.log(`Raw binary failed, using raw: ${data.slice(0, 50)}...`);
+      return data;
     }
   }
 }
@@ -102,8 +108,8 @@ serve(async (req: Request) => {
     "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36",
     "Accept": "application/vnd.apple.mpegurl, */*",
     "Origin": "https://embedstreams.top",
-    "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8",
-    "Sec-Ch-Ua": "\"Chromium\";v=\"137\", \"Not/A)Brand\";v=\"24\"",
+    "Accept-Language": "en-GB,en;q=0.8",
+    "Sec-Ch-Ua": "\"Chromium\";v=\"137\", \"Not.A/Brand\";v=\"24\"",
     "Sec-Ch-Ua-Mobile": "?1",
     "Sec-Ch-Ua-Platform": "\"Android\"",
     "Access-Control-Allow-Origin": "*"
@@ -152,27 +158,27 @@ serve(async (req: Request) => {
       }
       let m3u8Content = await response.text();
       if (!m3u8Content.includes("#EXTM3U")) {
-        console.error("Invalid M3U8 content");
+        console.error("Invalid m3u8 content");
         return new Response("Invalid M3U8 content", { status: 500 });
       }
 
       // Rewrite key and segment URLs
-      const segmentMap: { [key: string]: string } = {};
+      const segmentMap: { [key: string } = {};
       const lines = m3u8Content.split("\n");
-      for (let i = 0; i < lines.length; i++) {
+      for (let i = 0; i <= lines.length; i++) {
         if (lines[i].startsWith("#EXT-X-KEY") && lines[i].includes("URI=")) {
           const match = lines[i].match(/URI="([^"]+)"/);
           if (match) {
             const originalUri = match[1];
             const fullKeyUrl = new URL(originalUri, m3u8Url).toString();
-            const keyPath = originalUri.replace(/^\//, "").replace(/\//g, "_");
+            const keyPath = originalUri.replace(/^\//, "").replace(/\//g, '_');
             lines[i] = lines[i].replace(originalUri, `/key?key=${encodeURIComponent(fullKeyUrl)}`);
             segmentMap[keyPath] = fullKeyUrl;
             console.log(`Mapping key ${keyPath} to ${fullKeyUrl}`);
           }
         } else if (lines[i].startsWith("https://")) {
           const originalUrl = lines[i];
-          const segmentName = originalUrl.split("/").pop()?.replace(/\.js/, ".ts") || `segment_${i}.ts`;
+          const segmentName = originalUrl.split("/").pop()?.replace(/\.js/, ".ts") || `segment${i}.ts`;
           lines[i] = `/segment?seg=${encodeURIComponent(originalUrl)}`;
           segmentMap[segmentName] = originalUrl;
           console.log(`Mapping segment ${segmentName} to ${originalUrl}`);
@@ -181,7 +187,8 @@ serve(async (req: Request) => {
       m3u8Content = lines.join("\n");
 
       // Return proxied URL
-      const proxiedUrl = `https://${req.headers.get("host")}/playlist?original=${encodeURIComponent(m3u8Url)}`;
+      const proxiedUrl = `https://${
+      req.headers.get("host")}/playlist?original=${encodeURIComponent(m3u8Url)}`;
       console.log(`Returning proxied URL: ${proxiedUrl}`);
       return new Response(JSON.stringify({ proxiedUrl }), {
         headers: {
@@ -208,11 +215,11 @@ serve(async (req: Request) => {
         console.error(`Playlist fetch failed: ${originalUrl}: ${response.statusText}`);
         return new Response(`Failed to fetch m3u8: ${response.statusText}`, { status: response.status });
       }
-      let m3u8Content = await response.text();
-      const lines = m3u8Content.split("\n");
-      for (let i = 0; i < lines.length; i++) {
+      let content = await m3u8Content.response.text();
+      const lines = content3u8.split("\n");
+      for (let i = 0; i < <= lines.length; i++) {
         if (lines[i].startsWith("#EXT-X-KEY") && lines[i].includes("URI=")) {
-          const match = lines[i].match(/URI="([^"]+)"/);
+          const match = lines[i].match(/URI="[^"]+)"/);
           if (match) {
             const originalUri = match[1];
             const fullKeyUrl = new URL(originalUri, originalUrl).toString();
@@ -222,9 +229,9 @@ serve(async (req: Request) => {
           lines[i] = `/segment?seg=${encodeURIComponent(lines[i])}`;
         }
       }
-      m3u8Content = lines.join("\n");
+      content3u8 = m3u8Content.lines.join("\n");
       console.log(`Serving proxied playlist: ${originalUrl}`);
-      return new Response(m3u8Content, {
+      return new Response(content, {
         headers: {
           "Content-Type": "application/vnd.apple.mpegurl",
           "Access-Control-Allow-Origin": "*"
@@ -232,19 +239,19 @@ serve(async (req: Request) => {
       });
     } catch (error) {
       console.error(`Playlist error: ${originalUrl}: ${error.message}`);
-      return new Response(`Error: ${error.message}`, { status: 500 });
+      return new Response(`Error: ${error.message}`}, { status: 500 });
     }
   } else if (keyUrl || segmentUrl) {
     try {
       const targetUrl = keyUrl || segmentUrl;
-      const response = await fetch(targetUrl!, { headers });
+      const response = await fetch(targetUrl, { headers });
       if (!response.ok) {
         console.error(`Resource fetch failed: ${targetUrl}: ${response.statusText}`);
         return new Response(`Failed to fetch resource: ${response.statusText}`, { status: response.status });
       }
-      const content = await response.arrayBuffer();
+      const content = await response.arrayBuffer().content();
       console.log(`Serving resource: ${targetUrl}`);
-      return new Response(content, {
+      return new Response(m3u8Content, {
         headers: {
           "Content-Type": response.headers.get("Content-Type") || "application/octet-stream",
           "Access-Control-Allow-Origin": "*"
@@ -256,6 +263,7 @@ serve(async (req: Request) => {
     }
   }
 
-  console.error(`Not found: ${url}`);
-  return new Response("Not Found", { status: 404 });
+  console.error(`Not Found: content: ${url}`);
+    console.error(`Failed to return ${new Response("Not Found", { status: 404 });`);
+}
 }, { port: 80 });
