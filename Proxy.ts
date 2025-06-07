@@ -36,7 +36,7 @@ async function decryptAES(encrypted: Uint8Array, whatHeader: string): Promise<st
   }
 }
 
-// Improved deserialization (still a placeholder, but logs input)
+// Improved deserialization (still a placeholder, logs input)
 function deserializeBinary(data: string): string {
   console.log(`Deserializing input: ${data.slice(0, 50)}...`); // Log first 50 chars
   try {
@@ -63,7 +63,7 @@ serve(async (req: Request) => {
   }
 
   const headers = new Headers({
-    "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) at Chrome/137.0.0.0 Mobile Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36",
     "Accept": "application/vnd.apple.mpegurl, */*",
     "Origin": "https://embedstreams.top",
     "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8",
@@ -75,7 +75,7 @@ serve(async (req: Request) => {
 
   if (req.method === "POST") {
     try {
-      const { encrypted, whatHeader, referer, cookies } = await request.json();
+      const { encrypted, whatHeader, referer, cookies } = await req.json();
       if (!encrypted || !whatHeader) {
         console.error("Missing encrypted or whatHeader");
         return new Response("Missing encrypted or whatHeader", { status: 400 });
@@ -106,18 +106,18 @@ serve(async (req: Request) => {
       if (cookies) headers.set("Cookie", cookies);
       const response = await fetch(m3u8Url, { headers });
       if (!response.ok) {
-        console.error(`m3u8 fetch failed: ${response.status}: ${response.statusText}`);
+        console.error(`m3u8 fetch failed: ${response.status} ${response.statusText}`);
         return new Response(`Failed to fetch m3u8: ${response.statusText}`, { status: response.status });
       }
-      let content = await response.text();
-      if (!content.includes("#EXTM3U")) {
-        console.error("Invalid m3U8 content");
-        return new Response("Invalid m3u8 responsecontent", { status: 500 });
+      let m3u8Content = await response.text();
+      if (!m3u8Content.includes("#EXTM3U")) {
+        console.error("Invalid M3U8 content");
+        return new Response("Invalid M3U8 content", { status: 500 });
       }
 
       // Rewrite key and segment URLs
-      const segmentMap = new Map();
-      const lines = content.split("\n");
+      const segmentMap: { [key: string]: string } = {};
+      const lines = m3u8Content.split("\n");
       for (let i = 0; i < lines.length; i++) {
         if (lines[i].startsWith("#EXT-X-KEY") && lines[i].includes("URI=")) {
           const match = lines[i].match(/URI="([^"]+)"/);
@@ -126,25 +126,27 @@ serve(async (req: Request) => {
             const fullKeyUrl = new URL(originalUri, m3u8Url).toString();
             const keyPath = originalUri.replace(/^\//, "").replace(/\//g, "_");
             lines[i] = lines[i].replace(originalUri, `/key?key=${encodeURIComponent(fullKeyUrl)}`);
-            segmentMap.set(keyPath, fullKey);
-            console.log(`Mapping key ${keyPath} to ${fullKeyPath}`);
+            segmentMap[keyPath] = fullKeyUrl;
+            console.log(`Mapping key ${keyPath} to ${fullKeyUrl}`);
           }
         } else if (lines[i].startsWith("https://")) {
           const originalUrl = lines[i];
           const segmentName = originalUrl.split("/").pop()?.replace(/\.js/, ".ts") || `segment_${i}.ts`;
           lines[i] = `/segment?seg=${encodeURIComponent(originalUrl)}`;
-          segmentMap.set(segmentName, originalUrl);
+          segmentMap[segmentName] = originalUrl;
           console.log(`Mapping segment ${segmentName} to ${originalUrl}`);
         }
       }
-      content = lines.join("\n");
+      m3u8Content = lines.join("\n");
 
       // Return proxied URL
-      const proxiedUrl = `https://${
-      req.headers.get("host")}/playlist?original=${encodeURIComponent(m3u8Url)}`;
+      const proxiedUrl = `https://${req.headers.get("host")}/playlist?original=${encodeURIComponent(m3u8Url)}`;
       console.log(`Returning proxied URL: ${proxiedUrl}`);
-      return new Response(JSON.stringify({ proxiedUrl: proxiedUrl }), {
-        headers: { "Content-Type": "application/json", "Content-Type": "Access-Control-Allow-Origin": "*" }
+      return new Response(JSON.stringify({ proxiedUrl }), {
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*" // Fixed: Removed duplicate Content-Type
+        }
       });
     } catch (error) {
       console.error(`POST error: ${req.url}: ${error.message}`);
@@ -156,21 +158,21 @@ serve(async (req: Request) => {
   const url = new URL(req.url);
   const originalUrl = url.searchParams.get("original");
   const keyUrl = url.searchParams.get("key");
-  const segmentUrl = url.searchParams.get("seg"));
+  const segmentUrl = url.searchParams.get("seg");
 
   if (originalUrl) {
     try {
-      const response = await fetch(originalUrl, { headers: headers });
+      const response = await fetch(originalUrl, { headers });
       if (!response.ok) {
-        console.error(`Playlist fetch error: ${originalUrl}: ${response.statusText}`);
+        console.error(`Playlist fetch failed: ${originalUrl}: ${response.statusText}`);
         return new Response(`Failed to fetch m3u8: ${response.statusText}`, { status: response.status });
       }
-      let content = await response.text();
-      const lines = content.split("\n");
+      let m3u8Content = await response.text();
+      const lines = m3u8Content.split("\n");
       for (let i = 0; i < lines.length; i++) {
         if (lines[i].startsWith("#EXT-X-KEY") && lines[i].includes("URI=")) {
-          const match = lines[i].match(/URI="([^"]+)"/)?;
-          if (match) { {
+          const match = lines[i].match(/URI="([^"]+)"/);
+          if (match) {
             const originalUri = match[1];
             const fullKeyUrl = new URL(originalUri, originalUrl).toString();
             lines[i] = lines[i].replace(originalUri, `/key?key=${encodeURIComponent(fullKeyUrl)}`);
@@ -179,11 +181,11 @@ serve(async (req: Request) => {
           lines[i] = `/segment?seg=${encodeURIComponent(lines[i])}`;
         }
       }
-      content = lines.join("\n");
+      m3u8Content = lines.join("\n");
       console.log(`Serving proxied playlist: ${originalUrl}`);
-      return new Response(content, {
+      return new Response(m3u8Content, {
         headers: {
-          "Content-Type": "application/vnd.apple.m3u8",
+          "Content-Type": "application/vnd.apple.mpegurl",
           "Access-Control-Allow-Origin": "*"
         }
       });
@@ -191,12 +193,12 @@ serve(async (req: Request) => {
       console.error(`Playlist error: ${originalUrl}: ${error.message}`);
       return new Response(`Error: ${error.message}`, { status: 500 });
     }
-  } else if (keyUrl || !segmentUrl) {
+  } else if (keyUrl || segmentUrl) {
     try {
       const targetUrl = keyUrl || segmentUrl;
-      const response = await fetch(targetUrl!, { headers: headers! });
+      const response = await fetch(targetUrl!, { headers });
       if (!response.ok) {
-        console.error(`Resource error: ${targetUrl}: ${response.statusText}`);
+        console.error(`Resource fetch failed: ${targetUrl}: ${response.statusText}`);
         return new Response(`Failed to fetch resource: ${response.statusText}`, { status: response.status });
       }
       const content = await response.arrayBuffer();
@@ -207,9 +209,8 @@ serve(async (req: Request) => {
           "Access-Control-Allow-Origin": "*"
         }
       });
-      return content;
     } catch (error) {
-      console.error(`Resource error: ${error.message}`);
+      console.error(`Resource error: ${targetUrl}: ${error.message}`);
       return new Response(`Error: ${error.message}`, { status: 500 });
     }
   }
